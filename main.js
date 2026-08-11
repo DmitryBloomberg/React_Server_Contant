@@ -16,6 +16,8 @@ app.use(cors({
   credentials: true,
 }));
 
+app.use(express.static(path.join(__dirname, 'public')));
+
 // ===== Подключение к PostgreSQL =====
 const pool = new Pool({
   host: '127.0.0.1',
@@ -433,6 +435,13 @@ app.get('/api/requests/:id', async (req, res) => {
     console.error('GET REQUEST BY ID ERROR:', err);
     return res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
+});
+
+app.use((req, res, next) => {
+  if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
+  next();
 });
 
 const PORT = 5000;
