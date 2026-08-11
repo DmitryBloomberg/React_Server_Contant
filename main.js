@@ -76,6 +76,112 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS email_plain TEXT;
 `).catch((e) => console.error('Ошибка создания таблиц:', e.message));
 
 // =====================================================
+// АВТОСОЗДАНИЕ АДМИНИСТРАТОРА ПРИ ЗАПУСКЕ
+// =====================================================
+const DEFAULT_ADMIN = {
+  name: 'Admin',
+  surname: 'Admin',
+  email: 'admin',
+  password: 'Dima0807',
+};
+
+async function ensureDefaultAdminExists() {
+  try {
+    // Сначала ищем админа по открытому email_plain, если он есть
+    const { rows } = await pool.query(
+      `
+        SELECT *
+        FROM users
+        WHERE LOWER(email_plain) = LOWER($1)
+        LIMIT 1
+      `,
+      [DEFAULT_ADMIN.email]
+    );
+
+    let adminUser = rows[0] || null;
+
+    // Если не нашли по email_plain, ищем перебором по bcrypt-хэшу email
+    // Это нужно для старых записей, где email_plain может быть NULL
+    if (!adminUser) {
+      const allUsers = await pool.query('SELECT * FROM users');
+
+      for (const user of allUsers.rows) {
+        if (user.email && (await bcrypt.compare(DEFAULT_ADMIN.email, user.email))) {
+          adminUser = user;
+          break;
+        }
+      }
+    }
+
+    // Если админ уже есть — не создаём дубликат
+    if (adminUser) {
+      // На всякий случай обновим статус и plaintext-поля,
+      // чтобы админ точно был админом и отображался в админке
+      await pool.query(
+        `
+          UPDATE users
+          SET
+            status = 'administrator',
+            name_plain = COALESCE(name_plain, $1),
+            surname_plain = COALESCE(surname_plain, $2),
+            email_plain = COALESCE(email_plain, $3)
+          WHERE id = $4
+        `,
+        [
+          DEFAULT_ADMIN.name,
+          DEFAULT_ADMIN.surname,
+          DEFAULT_ADMIN.email,
+          adminUser.id,
+        ]
+      );
+
+      console.log('✅ Администратор уже существует. Создание пропущено.');
+      return adminUser.id;
+    }
+
+    // Если админа нет — хэшируем данные и создаём
+    const [nameHash, surnameHash, emailHash, passwordHash] = await Promise.all([
+      bcrypt.hash(DEFAULT_ADMIN.name, SALT_ROUNDS),
+      bcrypt.hash(DEFAULT_ADMIN.surname, SALT_ROUNDS),
+      bcrypt.hash(DEFAULT_ADMIN.email, SALT_ROUNDS),
+      bcrypt.hash(DEFAULT_ADMIN.password, SALT_ROUNDS),
+    ]);
+
+    const insertResult = await pool.query(
+      `
+        INSERT INTO users (
+          name,
+          surname,
+          email,
+          password,
+          status,
+          name_plain,
+          surname_plain,
+          email_plain
+        )
+        VALUES ($1, $2, $3, $4, 'administrator', $5, $6, $7)
+        RETURNING id
+      `,
+      [
+        nameHash,
+        surnameHash,
+        emailHash,
+        passwordHash,
+        DEFAULT_ADMIN.name,
+        DEFAULT_ADMIN.surname,
+        DEFAULT_ADMIN.email,
+      ]
+    );
+
+    console.log('✅ Создан администратор по умолчанию. ID:', insertResult.rows[0].id);
+    return insertResult.rows[0].id;
+  } catch (err) {
+    console.error('❌ Ошибка создания администратора по умолчанию:', err);
+    throw err;
+  }
+}
+
+// =====================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // =====================================================
 
