@@ -135,6 +135,454 @@ async function getAdminUser(req, res) {
   return user;
 }
 
+// =====================================================
+// ADMIN USERS MANAGEMENT
+// Управление пользователями: список, поиск, статус, удаление.
+// Вставьте этот блок перед const PORT = 5000;
+// =====================================================
+
+const ADMIN_ALLOWED_STATUSES = ['user', 'administrator'];
+
+function normalizeUserStatus(status) {
+  const s = String(status || '').trim().toLowerCase();
+
+  if (['admin', 'administrator', 'администратор'].includes(s)) {
+    return 'administrator';
+  }
+
+  if (['user', 'пользователь'].includes(s)) {
+    return 'user';
+  }
+
+  return null;
+}
+
+function toSafeUser(row) {
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    name: row.name_plain || null,
+    surname: row.surname_plain || null,
+    email: row.email_plain || null,
+    status: row.status || 'user',
+  };
+}
+
+async function findUserByIdAdmin(id) {
+  const { rows } = await pool.query(
+    'SELECT * FROM users WHERE id = $1',
+    [id]
+  );
+
+  return rows[0] || null;
+}
+
+async function findUserByEmailAdmin(email) {
+  const originalEmail = String(email || '').trim();
+  const lowerEmail = originalEmail.toLowerCase();
+
+  if (!lowerEmail) return null;
+
+  // Сначала ищем по открытой почте, если она сохранена.
+  const { rows } = await pool.query(
+    'SELECT * FROM users WHERE LOWER(email_plain) = $1 LIMIT 1',
+    [lowerEmail]
+  );
+
+  if (rows[0]) return rows[0];
+
+  // Fallback для старых записей, где email_plain может быть NULL.
+  // Тогда ищем перебором по bcrypt-хэшу почты.
+  return findUserByRawEmail(originalEmail);
+}
+
+async function deleteUserByIdAdmin(admin, userId, deleteRequests) {
+  if (!userId || Number(userId) === Number(admin.id)) {
+    const err = new Error('Нельзя удалить самого себя');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    if (deleteRequests) {
+      // Полностью удаляем заявки пользователя.
+      await client.query(
+        'DELETE FROM requests WHERE userid = $1',
+        [userId]
+      );
+    } else {
+      // Сохраняем заявки, но отвязываем их от удалённого пользователя.
+      await client.query(
+        'UPDATE requests SET userid = NULL WHERE userid = $1',
+        [userId]
+      );
+    }
+
+    const { rows } = await client.query(
+      'DELETE FROM users WHERE id = $1 RETURNING id',
+      [userId]
+    );
+
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    await client.query('COMMIT');
+    return rows[0].id;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ================= СПИСОК ПОЛЬЗОВАТЕЛЕЙ =================
+// Примеры:
+// GET /api/admin/users
+// GET /api/admin/users?search=5
+// GET /api/admin/users?search=ivan
+// GET /api/admin/users?search=user@mail.ru
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const admin = await getAdminUser(req, res);
+    if (!admin) return;
+
+    const search = String(req.query.search || '').trim();
+
+    let query = 'SELECT * FROM users';
+    const params = [];
+
+    if (search) {
+      if (/^\d+$/.test(search)) {
+        query += ' WHERE id = $1';
+        params.push(parseInt(search, 10));
+      } else {
+        const escapedSearch = search
+          .toLowerCase()
+          .replace(/[%_]/g, '\\$&');
+
+        query += `
+          WHERE LOWER(COALESCE(email_plain, '')) LIKE $1
+             OR LOWER(COALESCE(name_plain, '')) LIKE $1
+             OR LOWER(COALESCE(surname_plain, '')) LIKE $1
+        `;
+
+        params.push(`%${escapedSearch}%`);
+      }
+    }
+
+    query += ' ORDER BY id';
+
+    const { rows } = await pool.query(query, params);
+
+    return res.json({
+      success: true,
+      users: rows.map(toSafeUser),
+    });
+  } catch (err) {
+    console.error('ADMIN GET USERS ERROR:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера',
+    });
+  }
+});
+
+// ================= ПОЛЬЗОВАТЕЛЬ ПО EMAIL =================
+// GET /api/admin/users/by-email/user@mail.ru
+app.get('/api/admin/users/by-email/:email', async (req, res) => {
+  try {
+    const admin = await getAdminUser(req, res);
+    if (!admin) return;
+
+    const user = await findUserByEmailAdmin(req.params.email);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
+    }
+
+    return res.json({
+      success: true,
+      user: toSafeUser(user),
+    });
+  } catch (err) {
+    console.error('ADMIN GET USER BY EMAIL ERROR:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера',
+    });
+  }
+});
+
+// ================= ПОЛЬЗОВАТЕЛЬ ПО ID =================
+// GET /api/admin/users/5
+app.get('/api/admin/users/:id', async (req, res) => {
+  try {
+    const admin = await getAdminUser(req, res);
+    if (!admin) return;
+
+    const userId = parseInt(req.params.id, 10);
+
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Неверный id пользователя',
+      });
+    }
+
+    const user = await findUserByIdAdmin(userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
+    }
+
+    return res.json({
+      success: true,
+      user: toSafeUser(user),
+    });
+  } catch (err) {
+    console.error('ADMIN GET USER BY ID ERROR:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера',
+    });
+  }
+});
+
+// ================= СМЕНА СТАТУСА ПО EMAIL =================
+// PATCH /api/admin/users/by-email/user@mail.ru/status
+// body: { "status": "user" } или { "status": "administrator" }
+app.patch('/api/admin/users/by-email/:email/status', async (req, res) => {
+  try {
+    const admin = await getAdminUser(req, res);
+    if (!admin) return;
+
+    const target = await findUserByEmailAdmin(req.params.email);
+
+    if (!target) {
+      return res.status(404).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
+    }
+
+    const newStatus = normalizeUserStatus(req.body?.status);
+
+    if (!ADMIN_ALLOWED_STATUSES.includes(newStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Недопустимый статус',
+      });
+    }
+
+    if (target.id === admin.id && newStatus !== 'administrator') {
+      return res.status(400).json({
+        success: false,
+        message: 'Нельзя понизить свой собственный администраторский статус',
+      });
+    }
+
+    await pool.query(
+      'UPDATE users SET status = $1 WHERE id = $2',
+      [newStatus, target.id]
+    );
+
+    return res.json({
+      success: true,
+      id: target.id,
+      status: newStatus,
+    });
+  } catch (err) {
+    console.error('ADMIN PATCH USER STATUS BY EMAIL ERROR:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера',
+    });
+  }
+});
+
+// ================= СМЕНА СТАТУСА ПО ID =================
+// PATCH /api/admin/users/5/status
+// body: { "status": "user" } или { "status": "administrator" }
+app.patch('/api/admin/users/:id/status', async (req, res) => {
+  try {
+    const admin = await getAdminUser(req, res);
+    if (!admin) return;
+
+    const userId = parseInt(req.params.id, 10);
+
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Неверный id пользователя',
+      });
+    }
+
+    const target = await findUserByIdAdmin(userId);
+
+    if (!target) {
+      return res.status(404).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
+    }
+
+    const newStatus = normalizeUserStatus(req.body?.status);
+
+    if (!ADMIN_ALLOWED_STATUSES.includes(newStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Недопустимый статус',
+      });
+    }
+
+    if (target.id === admin.id && newStatus !== 'administrator') {
+      return res.status(400).json({
+        success: false,
+        message: 'Нельзя понизить свой собственный администраторский статус',
+      });
+    }
+
+    await pool.query(
+      'UPDATE users SET status = $1 WHERE id = $2',
+      [newStatus, target.id]
+    );
+
+    return res.json({
+      success: true,
+      id: target.id,
+      status: newStatus,
+    });
+  } catch (err) {
+    console.error('ADMIN PATCH USER STATUS BY ID ERROR:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера',
+    });
+  }
+});
+
+// ================= УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ПО EMAIL =================
+// DELETE /api/admin/users/by-email/user@mail.ru
+// DELETE /api/admin/users/by-email/user@mail.ru?deleteRequests=true
+app.delete('/api/admin/users/by-email/:email', async (req, res) => {
+  try {
+    const admin = await getAdminUser(req, res);
+    if (!admin) return;
+
+    const target = await findUserByEmailAdmin(req.params.email);
+
+    if (!target) {
+      return res.status(404).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
+    }
+
+    const deleteRequests =
+      String(req.query.deleteRequests || '').toLowerCase() === 'true';
+
+    const deletedId = await deleteUserByIdAdmin(
+      admin,
+      target.id,
+      deleteRequests
+    );
+
+    if (!deletedId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
+    }
+
+    return res.json({
+      success: true,
+      id: deletedId,
+    });
+  } catch (err) {
+    console.error('ADMIN DELETE USER BY EMAIL ERROR:', err);
+
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({
+        success: false,
+        message: err.message,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера',
+    });
+  }
+});
+
+// ================= УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ПО ID =================
+// DELETE /api/admin/users/5
+// DELETE /api/admin/users/5?deleteRequests=true
+app.delete('/api/admin/users/:id', async (req, res) => {
+  try {
+    const admin = await getAdminUser(req, res);
+    if (!admin) return;
+
+    const userId = parseInt(req.params.id, 10);
+
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Неверный id пользователя',
+      });
+    }
+
+    const deleteRequests =
+      String(req.query.deleteRequests || '').toLowerCase() === 'true';
+
+    const deletedId = await deleteUserByIdAdmin(
+      admin,
+      userId,
+      deleteRequests
+    );
+
+    if (!deletedId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
+    }
+
+    return res.json({
+      success: true,
+      id: deletedId,
+    });
+  } catch (err) {
+    console.error('ADMIN DELETE USER BY ID ERROR:', err);
+
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({
+        success: false,
+        message: err.message,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера',
+    });
+  }
+});
+
 // ================= РЕГИСТРАЦИЯ =================
 app.post('/api/register', async (req, res) => {
   try {
