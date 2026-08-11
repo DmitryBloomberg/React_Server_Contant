@@ -20,7 +20,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ===== Подключение к PostgreSQL =====
 const pool = new Pool({
-  host: 'http://13.143.64.167',
+  host: '13.143.64.167',
   port: 6432,
   database: 'KomfortDatabase',
   user: 'postgres',
