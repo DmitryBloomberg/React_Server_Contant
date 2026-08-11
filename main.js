@@ -1,4 +1,4 @@
-// main.js — сервер «Komfort» (полностью переписанная версия)
+// main.js — сервер «Komfort» (финальная версия со всеми исправлениями)
 const express      = require('express');
 const cors         = require('cors');
 const cookieParser = require('cookie-parser');
@@ -12,10 +12,9 @@ const app = express();
 app.disable('x-powered-by');
 
 // ===================== CORS =====================
-// origin: true — сервер отражает ЛЮБОЙ origin, с которого пришёл запрос.
-// Благодаря этому сайт работает и по IP, и по домену, и с localhost:3000
-// в режиме разработки. Куки защищены sameSite: 'lax' + httpOnly.
-// Если захотите строгий список — замените на:
+// origin: true — отражает ЛЮБОЙ origin (работает и по IP, и по домену,
+// и с localhost:3000 в разработке). Куки защищены httpOnly + sameSite: lax.
+// Хотите строгий список — замените на:
 // origin: ['http://localhost:3000', 'http://ваш-домен.ru']
 app.use(cors({ origin: true, credentials: true }));
 
@@ -24,8 +23,6 @@ app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ===================== PostgreSQL =====================
-// Значения по умолчанию оставлены ваши, но их можно переопределить
-// через переменные окружения (безопаснее, чем держать пароль в коде).
 const pool = new Pool({
   host:     process.env.DB_HOST     || '127.0.0.1',
   port:     Number(process.env.DB_PORT || 6432),
@@ -34,8 +31,8 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'Dima0807',
 });
 
-const SALT_ROUNDS = 10;
-const COOKIE_NAME = 'user_email_hash';
+const SALT_ROUNDS  = 10;
+const COOKIE_NAME  = 'user_email_hash';
 const COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: 'lax',
@@ -46,7 +43,7 @@ const COOKIE_OPTIONS = {
 const MINIDATA_DIR = path.join(__dirname, 'minidata');
 if (!fs.existsSync(MINIDATA_DIR)) fs.mkdirSync(MINIDATA_DIR);
 
-// Multer: только изображения/видео, до 5 файлов, до 50 МБ каждый
+// Multer: только фото/видео, до 5 файлов, до 50 МБ каждый
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024, files: 5 },
@@ -58,111 +55,6 @@ const upload = multer({
 
 const redirectFor = (status) =>
   String(status || '').toLowerCase() === 'administrator' ? '/applications' : '/dashboard';
-
-// ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
-async function findUserByRawEmail(email) {
-  const { rows } = await pool.query('SELECT * FROM users');
-  for (const row of rows) {
-    if (await bcrypt.compare(email, row.email)) return row;
-  }
-  return null;
-}
-
-async function findUserByHash(hash) {
-  const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [hash]);
-  return rows[0] || null;
-}
-
-function readRequestData(requestId) {
-  const requestDir = path.join(MINIDATA_DIR, String(requestId));
-  let mediaFiles = [];
-  let description = 'Нет описания';
-  if (fs.existsSync(requestDir)) {
-    const descPath = path.join(requestDir, 'description.txt');
-    if (fs.existsSync(descPath)) description = fs.readFileSync(descPath, 'utf-8');
-    mediaFiles = fs
-      .readdirSync(requestDir)
-      .filter((f) => f.startsWith('media_'))
-      .sort()
-      .map((f) => ({
-        filename: f,
-        url: `/api/media/${requestId}/${f}`,
-        type: /\.(mp4|webm|ogg|mov)$/i.test(f) ? 'video' : 'image',
-      }));
-  }
-  return { description, mediaFiles };
-}
-
-async function getAdminUser(req, res) {
-  const hash = req.cookies[COOKIE_NAME];
-  if (!hash) { res.status(401).json({ success: false, message: 'Не авторизован' }); return null; }
-  const user = await findUserByHash(hash);
-  if (!user) { res.status(401).json({ success: false, message: 'Пользователь не найден' }); return null; }
-  if (String(user.status).toLowerCase() !== 'administrator') {
-    res.status(403).json({ success: false, message: 'Доступ только для администратора' });
-    return null;
-  }
-  return user;
-}
-
-// ===================== АДМИН: управление пользователями =====================
-const ADMIN_ALLOWED_STATUSES = ['user', 'administrator'];
-
-function normalizeUserStatus(status) {
-  const s = String(status || '').trim().toLowerCase();
-  if (['admin', 'administrator', 'администратор'].includes(s)) return 'administrator';
-  if (['user', 'пользователь'].includes(s)) return 'user';
-  return null;
-}
-
-function toSafeUser(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    name: row.name_plain || null,
-    surname: row.surname_plain || null,
-    email: row.email_plain || null,
-    status: row.status || 'user',
-  };
-}
-
-async function findUserByEmailAdmin(email) {
-  const originalEmail = String(email || '').trim();
-  const lowerEmail = originalEmail.toLowerCase();
-  if (!lowerEmail) return null;
-  const { rows } = await pool.query(
-    'SELECT * FROM users WHERE LOWER(email_plain) = $1 LIMIT 1',
-    [lowerEmail]
-  );
-  if (rows[0]) return rows[0];
-  return findUserByRawEmail(originalEmail);
-}
-
-async function deleteUserByIdAdmin(admin, userId, deleteRequests) {
-  if (!userId || Number(userId) === Number(admin.id)) {
-    const err = new Error('Нельзя удалить самого себя');
-    err.statusCode = 400;
-    throw err;
-  }
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    if (deleteRequests) {
-      await client.query('DELETE FROM requests WHERE userid = $1', [userId]);
-    } else {
-      await client.query('UPDATE requests SET userid = NULL WHERE userid = $1', [userId]);
-    }
-    const { rows } = await client.query('DELETE FROM users WHERE id = $1 RETURNING id', [userId]);
-    if (!rows.length) { await client.query('ROLLBACK'); return null; }
-    await client.query('COMMIT');
-    return rows[0].id;
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-}
 
 // ===================== ИНИЦИАЛИЗАЦИЯ БД + АДМИН =====================
 const DEFAULT_ADMIN = { name: 'Admin', surname: 'Admin', email: 'admin', password: 'Dima0807' };
@@ -182,6 +74,7 @@ async function initDatabase() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS surname_plain TEXT`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_plain TEXT`);
   await ensureDefaultAdminExists();
+  console.log('✅ База данных инициализирована');
 }
 
 async function ensureDefaultAdminExists() {
@@ -192,6 +85,7 @@ async function ensureDefaultAdminExists() {
     );
     let adminUser = rows[0] || null;
 
+    // Fallback для старых записей без email_plain — перебор по bcrypt-хэшу
     if (!adminUser) {
       const allUsers = await pool.query('SELECT * FROM users');
       for (const user of allUsers.rows) {
@@ -236,10 +130,116 @@ async function ensureDefaultAdminExists() {
   }
 }
 
-// ===================== HEALTH =====================
-app.get('/api/health', (req, res) => res.json({ success: true, uptime: process.uptime() }));
+// ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+async function findUserByRawEmail(email) {
+  const { rows } = await pool.query('SELECT * FROM users');
+  for (const row of rows) {
+    if (await bcrypt.compare(email, row.email)) return row;
+  }
+  return null;
+}
 
-// ===================== АДМИН: маршруты пользователей =====================
+async function findUserByHash(hash) {
+  const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [hash]);
+  return rows[0] || null;
+}
+
+async function findUserByIdAdmin(id) {
+  const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+  return rows[0] || null;
+}
+
+function readRequestData(requestId) {
+  const requestDir = path.join(MINIDATA_DIR, String(requestId));
+  let mediaFiles = [];
+  let description = 'Нет описания';
+  if (fs.existsSync(requestDir)) {
+    const descPath = path.join(requestDir, 'description.txt');
+    if (fs.existsSync(descPath)) description = fs.readFileSync(descPath, 'utf-8');
+    mediaFiles = fs
+      .readdirSync(requestDir)
+      .filter((f) => f.startsWith('media_'))
+      .sort()
+      .map((f) => ({
+        filename: f,
+        url: `/api/media/${requestId}/${f}`,
+        type: /\.(mp4|webm|ogg|mov)$/i.test(f) ? 'video' : 'image',
+      }));
+  }
+  return { description, mediaFiles };
+}
+
+async function getAdminUser(req, res) {
+  const hash = req.cookies[COOKIE_NAME];
+  if (!hash) { res.status(401).json({ success: false, message: 'Не авторизован' }); return null; }
+  const user = await findUserByHash(hash);
+  if (!user) { res.status(401).json({ success: false, message: 'Пользователь не найден' }); return null; }
+  if (String(user.status).toLowerCase() !== 'administrator') {
+    res.status(403).json({ success: false, message: 'Доступ только для администратора' });
+    return null;
+  }
+  return user;
+}
+
+// ===================== АДМИН: ПОЛЬЗОВАТЕЛИ =====================
+const ADMIN_ALLOWED_STATUSES = ['user', 'administrator'];
+
+function normalizeUserStatus(status) {
+  const s = String(status || '').trim().toLowerCase();
+  if (['admin', 'administrator', 'администратор'].includes(s)) return 'administrator';
+  if (['user', 'пользователь'].includes(s)) return 'user';
+  return null;
+}
+
+function toSafeUser(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name_plain || null,
+    surname: row.surname_plain || null,
+    email: row.email_plain || null,
+    status: row.status || 'user',
+  };
+}
+
+async function findUserByEmailAdmin(email) {
+  const originalEmail = String(email || '').trim();
+  const lowerEmail = originalEmail.toLowerCase();
+  if (!lowerEmail) return null;
+  const { rows } = await pool.query(
+    'SELECT * FROM users WHERE LOWER(email_plain) = $1 LIMIT 1', [lowerEmail]
+  );
+  if (rows[0]) return rows[0];
+  return findUserByRawEmail(originalEmail);
+}
+
+async function deleteUserByIdAdmin(admin, userId, deleteRequests) {
+  if (!userId || Number(userId) === Number(admin.id)) {
+    const err = new Error('Нельзя удалить самого себя');
+    err.statusCode = 400;
+    throw err;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (deleteRequests) {
+      await client.query('DELETE FROM requests WHERE userid = $1', [userId]);
+    } else {
+      await client.query('UPDATE requests SET userid = NULL WHERE userid = $1', [userId]);
+    }
+    const { rows } = await client.query('DELETE FROM users WHERE id = $1 RETURNING id', [userId]);
+    if (!rows.length) { await client.query('ROLLBACK'); return null; }
+    await client.query('COMMIT');
+    return rows[0].id;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// GET /api/admin/users?search=...
 app.get('/api/admin/users', async (req, res) => {
   try {
     const admin = await getAdminUser(req, res);
@@ -254,8 +254,8 @@ app.get('/api/admin/users', async (req, res) => {
       } else {
         const escaped = search.toLowerCase().replace(/[%_]/g, '\\$&');
         query += ` WHERE LOWER(COALESCE(email_plain,'')) LIKE $1
-                   OR LOWER(COALESCE(name_plain,'')) LIKE $1
-                   OR LOWER(COALESCE(surname_plain,'')) LIKE $1`;
+                    OR LOWER(COALESCE(name_plain,'')) LIKE $1
+                    OR LOWER(COALESCE(surname_plain,'')) LIKE $1`;
         params.push(`%${escaped}%`);
       }
     }
@@ -287,9 +287,9 @@ app.get('/api/admin/users/:id', async (req, res) => {
     if (!admin) return;
     const userId = parseInt(req.params.id, 10);
     if (isNaN(userId)) return res.status(400).json({ success: false, message: 'Неверный id пользователя' });
-    const user = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-    if (!user.rows[0]) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
-    return res.json({ success: true, user: toSafeUser(user.rows[0]) });
+    const user = await findUserByIdAdmin(userId);
+    if (!user) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    return res.json({ success: true, user: toSafeUser(user) });
   } catch (err) {
     console.error('ADMIN GET USER BY ID ERROR:', err);
     return res.status(500).json({ success: false, message: 'Ошибка сервера' });
@@ -321,12 +321,12 @@ app.patch('/api/admin/users/:id/status', async (req, res) => {
     if (!admin) return;
     const userId = parseInt(req.params.id, 10);
     if (isNaN(userId)) return res.status(400).json({ success: false, message: 'Неверный id пользователя' });
-    const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-    if (!rows[0]) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    const target = await findUserByIdAdmin(userId);
+    if (!target) return res.status(404).json({ success: false, message: 'Пользователь не найден' });
     const newStatus = normalizeUserStatus(req.body?.status);
     if (!ADMIN_ALLOWED_STATUSES.includes(newStatus))
       return res.status(400).json({ success: false, message: 'Недопустимый статус' });
-    if (rows[0].id === admin.id && newStatus !== 'administrator')
+    if (target.id === admin.id && newStatus !== 'administrator')
       return res.status(400).json({ success: false, message: 'Нельзя понизить свой собственный статус' });
     await pool.query('UPDATE users SET status = $1 WHERE id = $2', [newStatus, userId]);
     return res.json({ success: true, id: userId, status: newStatus });
@@ -405,7 +405,7 @@ app.post('/api/login', async (req, res) => {
     if (!user) return res.status(401).json({ success: false, message: 'Неверная почта или пароль' });
     const passwordOk = await bcrypt.compare(password, user.password);
     if (!passwordOk) return res.status(401).json({ success: false, message: 'Неверная почта или пароль' });
-    res.cookie(COOKIE_NAME, user.email, COOKIE_OPTIONS); // user.email — это и есть bcrypt-хэш почты
+    res.cookie(COOKIE_NAME, user.email, COOKIE_OPTIONS); // user.email — это bcrypt-хэш почты
     return res.json({ success: true, status: user.status, redirect: redirectFor(user.status) });
   } catch (err) {
     console.error('LOGIN ERROR:', err);
@@ -432,6 +432,10 @@ app.get('/api/session', async (req, res) => {
 app.post('/api/logout', (req, res) => {
   res.clearCookie(COOKIE_NAME);
   res.json({ success: true });
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ success: true, uptime: process.uptime() });
 });
 
 // ===================== ЗАЯВКИ =====================
@@ -489,8 +493,6 @@ app.get('/api/requests/my', async (req, res) => {
       id: row.id, entrance: row.entrance, floor: row.floor,
       category: row.category, status: row.status,
       ...readRequestData(row.id),
-      media: readRequestData(row.id).mediaFiles,
-      description: readRequestData(row.id).description,
     }));
     return res.json({ success: true, requests });
   } catch (err) {
@@ -510,17 +512,14 @@ app.get('/api/requests/all', async (req, res) => {
       FROM requests r LEFT JOIN users u ON u.id = r.userid
       ORDER BY r.id DESC
     `);
-    const requests = rows.map((row) => {
-      const { description, mediaFiles } = readRequestData(row.id);
-      return {
-        id: row.id, entrance: row.entrance, floor: row.floor,
-        category: row.category, status: row.status,
-        description, media: mediaFiles,
-        user_name: row.user_name || null,
-        user_surname: row.user_surname || null,
-        user_email: row.user_email || null,
-      };
-    });
+    const requests = rows.map((row) => ({
+      id: row.id, entrance: row.entrance, floor: row.floor,
+      category: row.category, status: row.status,
+      ...readRequestData(row.id),
+      user_name: row.user_name || null,
+      user_surname: row.user_surname || null,
+      user_email: row.user_email || null,
+    }));
     return res.json({ success: true, requests });
   } catch (err) {
     console.error('GET ALL REQUESTS ERROR:', err);
@@ -555,17 +554,16 @@ app.get('/api/requests/:id', async (req, res) => {
     const requestId = parseInt(req.params.id, 10);
     if (isNaN(requestId)) return res.status(400).json({ success: false, message: 'Введите числовой номер заявки' });
     const { rows } = await pool.query(
-      'SELECT id, userid, entrance, floor, category, status FROM requests WHERE id = $1',
-      [requestId]
+      'SELECT id, userid, entrance, floor, category, status FROM requests WHERE id = $1', [requestId]
     );
     if (!rows.length) return res.status(404).json({ success: false, message: `Заявка № ${requestId} не найдена` });
-    const { description, mediaFiles } = readRequestData(rows[0].id);
+    const row = rows[0];
     return res.json({
       success: true,
       request: {
-        id: rows[0].id, entrance: rows[0].entrance, floor: rows[0].floor,
-        category: rows[0].category, status: rows[0].status,
-        description, media: mediaFiles,
+        id: row.id, entrance: row.entrance, floor: row.floor,
+        category: row.category, status: row.status,
+        ...readRequestData(row.id),
       },
     });
   } catch (err) {
@@ -574,7 +572,7 @@ app.get('/api/requests/:id', async (req, res) => {
   }
 });
 
-// ===================== 404 для API =====================
+// ===================== 404 ДЛЯ API =====================
 app.use((req, res, next) => {
   if (req.path.startsWith('/api')) {
     return res.status(404).json({ success: false, message: 'Маршрут не найден' });
@@ -582,12 +580,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===================== SPA fallback =====================
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// ===================== SPA FALLBACK =====================
+// ⚠️ Совместимо и с Express 4, и с Express 5 (без wildcard '*')
+app.use((req, res, next) => {
+  if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
+  next();
 });
 
-// ===================== Глобальный обработчик ошибок =====================
+// ===================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК =====================
 app.use((err, req, res, next) => {
   console.error('ERROR:', err.message || err);
   if (err instanceof multer.MulterError) {
