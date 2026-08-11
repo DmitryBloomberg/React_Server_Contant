@@ -13,7 +13,7 @@ DB_NAME="KomfortDatabase"
 DB_USER="postgres"
 DB_PASS="Dima0807"
 DB_PORT=6432
-DB_HOST="13.143.64.167"
+DB_HOST="127.0.0.1"
 NODE_MAJOR=20
 
 # Цвета
