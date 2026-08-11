@@ -1,16 +1,16 @@
 {
   "files": {
     "main.css": "/static/css/main.6c7b3b5a.css",
-    "main.js": "/static/js/main.27974b6f.js",
+    "main.js": "/static/js/main.1473e4eb.js",
     "static/js/453.318b3928.chunk.js": "/static/js/453.318b3928.chunk.js",
     "static/media/RightPanel.mp4": "/static/media/RightPanel.bfe8b8868d5fd66cdb4c.mp4",
     "index.html": "/index.html",
     "main.6c7b3b5a.css.map": "/static/css/main.6c7b3b5a.css.map",
-    "main.27974b6f.js.map": "/static/js/main.27974b6f.js.map",
+    "main.1473e4eb.js.map": "/static/js/main.1473e4eb.js.map",
     "453.318b3928.chunk.js.map": "/static/js/453.318b3928.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.6c7b3b5a.css",
-    "static/js/main.27974b6f.js"
+    "static/js/main.1473e4eb.js"
   ]
 }
