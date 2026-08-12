@@ -221,7 +221,9 @@ function readRequestData(requestId) {
         type: /\.(mp4|webm|ogg|mov)$/i.test(fileName) ? 'video' : 'image',
       }));
   }
-  return { description, mediaFiles };
+  // The React client reads request.media. Keep the API response aligned with
+  // that contract so saved attachments are rendered in both request views.
+  return { description, media: mediaFiles };
 }
 
 async function getAdminUser(req, res) {
